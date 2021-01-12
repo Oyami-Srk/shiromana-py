@@ -20,8 +20,10 @@ class MediaType(Enum):
 
 
 class Media:
+    id: int = None
     hash: str = None
     filename: str = None
+    filesize: int = None
     caption: str = None
     time_add: str = None
     type: MediaType = None
@@ -57,6 +59,7 @@ class Media:
             datetime.datetime.fromisoformat(info['time_add']).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
         )
         ret_str += "Media Type: {}\n".format(info['type'].name)
+        ret_str += "Media Size: {:.2f} KB\n".format(info['filesize'] / 1024)
         if info['sub_type'] is not None:
             ret_str += "Sub Type: {}\n".format(info['sub_type'])
         if info['type_addition'] is not None:
@@ -71,8 +74,10 @@ class Media:
 
     def to_dict(self):
         return {
+            "id": self.id,
             "hash": self.hash,
             "filename": self.filename,
+            "filesize": self.filesize,
             "caption": self.caption,
             "time_add": self.time_add,
             "type": self.type,
@@ -86,8 +91,10 @@ class Media:
     @staticmethod
     def from_dict(d: dict, lib: Library):
         ret = Media(lib)
+        ret.id = d['id']
         ret.hash = d['hash']
         ret.filename = d['filename']
+        ret.filesize = d['filesize']
         ret.caption = d['caption']
         ret.type = d['type']
         ret.time_add = d['time_add']

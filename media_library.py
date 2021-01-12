@@ -10,6 +10,7 @@ import json
 import hashlib
 import shutil
 import random
+from typing import Union
 
 import config
 from media import Media, MediaType
@@ -52,6 +53,7 @@ def create_library(path: str, lib_name: str, master_name: str = "", local_name: 
             id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL UNIQUE,
             hash CHAR(32) NOT NULL UNIQUE,
             filename TEXT NOT NULL,
+            filesize INTEGER NOT NULL, /* Store in Bytes */
             caption TEXT,
             time_add TIMESTAMP NOT NULL DEFAULT(STRFTIME('%Y-%m-%d %H:%M:%f+00:00', 'NOW')),
             type INTEGER NOT NULL,
@@ -61,6 +63,23 @@ def create_library(path: str, lib_name: str, master_name: str = "", local_name: 
             series_no INTEGER,
             comment TEXT,
             FOREIGN KEY(series_uuid) REFERENCES series(uuid)
+        );
+        
+        CREATE TABLE media_detail(
+            id INTEGER PRIMARY KEY NOT NULL UNIQUE,
+            height INTEGER NOT NULL,
+            width INTEGER NOT NULL,
+            dpi TEXT NOT NULL,
+            format TEXT NOT NULL,
+            tags TEXT, /* Split by ',' */
+            FOREIGN KEY(id) REFERENCES media(id)
+        );
+        
+        CREATE TABLE media_tags_ref(
+            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL UNIQUE,
+            media_id INTEGER NOT NULL,
+            tags_uuid CHAR(36) NOT NULL,
+            FOREIGN KEY(media_id) REFERENCES media(id)
         );
 
         CREATE TABLE series(
@@ -87,13 +106,11 @@ def create_library(path: str, lib_name: str, master_name: str = "", local_name: 
     )
     conn_db.commit()
     conn_shared = sqlite3.connect(config.SHARED_DATABASE_FN)
-    conn_media = sqlite3.connect(config.MEDIA_DATABASE_FN)
     with open(config.FINGERPRINT_FN, "w") as f:
         f.write(library_uuid)
     os.mkdir(config.MEDIAS_FOLDER)
     conn_db.close()
     conn_shared.close()
-    conn_media.close()
     os.chdir(cwd)
     config.release_lock(library_path)
 
@@ -102,7 +119,7 @@ def open_library(path: str):
     if not os.path.exists(path):
         raise Exception("Not Exists")
     if not all(i in os.listdir(path) for i in
-               [config.FINGERPRINT_FN, config.DATABASE_FN, config.MEDIA_DATABASE_FN, config.METADATA_FN,
+               [config.FINGERPRINT_FN, config.DATABASE_FN, config.METADATA_FN,
                 config.MEDIAS_FOLDER]):
         raise Exception("Not Library")
 
@@ -130,7 +147,7 @@ def open_library(path: str):
     lib.uuid = library_metadata['UUID']
     lib.schema = library_metadata['schema']
     lib.summary = LibrarySummary.from_dict(library_metadata['summary'])
-    lib.index_db = sqlite3.connect(config.DATABASE_FN)
+    lib.db = sqlite3.connect(config.DATABASE_FN)
     os.chdir(cwd)
     return lib
 
@@ -167,9 +184,8 @@ class LibrarySummary:
 
 
 class Library:
-    index_db: sqlite3.Connection = None
+    db: sqlite3.Connection = None
     shared_db: sqlite3.Connection = None
-    media_db: sqlite3.Connection = None
     path: str = None
     summary: LibrarySummary = LibrarySummary()
     uuid: str = None
@@ -182,12 +198,12 @@ class Library:
         pass
 
     def __del__(self):
-        self.index_db.commit()
-        self.index_db.close()
+        self.db.commit()
+        self.db.close()
         config.release_lock(self.path)
 
     def add_media(self, path: str, kind: MediaType, sub_kind: str = None, kind_addition: str = None, caption=None,
-                  comment: str = None) -> int:
+                  comment: str = None) -> Media:
         """
         :param path: path to media indicated how to access media file
         :param kind: media type (use kind to avoid built-in name)
@@ -197,6 +213,7 @@ class Library:
         :param comment: media comment
         :return: integer for media id used for index media
         """
+        ori_kind = kind
         kind = kind.value
         if not os.path.isfile(path):
             raise Exception("Not Exists or Not a File")
@@ -210,25 +227,51 @@ class Library:
             raise Exception("Already Exists")
         os.makedirs(self.path + '/' + config.MEDIAS_FOLDER + '/' + file_hash[:2], exist_ok=True)
         shutil.copy(path, new_path)
-        cur = self.index_db.cursor()
+        cur = self.db.cursor()
+        filesize = os.path.getsize(new_path)
         cur.execute(
             """
-            INSERT INTO media (hash, filename, caption, type, sub_type, type_addition, comment)
-            VALUES (?,?,?,?,?,?,?);
+            INSERT INTO media (hash, filename, filesize, caption, type, sub_type, type_addition, comment)
+            VALUES (?,?,?,?,?,?,?,?);
             """,
-            (file_hash, filename, caption, kind, sub_kind, kind_addition, comment)
+            (file_hash, filename, filesize, caption, kind, sub_kind, kind_addition, comment)
         )
-        ret_id = cur.lastrowid
+        id = cur.lastrowid
+        cur.execute(
+            """
+            SELECT time_add FROM media WHERE id = ?;
+            """,
+            (id,)
+        )
+        time_add = cur.fetchall()[0][0]
         cur.close()
-        self.index_db.commit()
-        return ret_id
+        self.db.commit()
+        return Media.from_dict(
+            {
+                "id": id,
+                "hash": file_hash,
+                "filename": filename,
+                "filesize": filesize,
+                "caption": caption,
+                "time_add": time_add,
+                "type": ori_kind,
+                "sub_type": sub_kind,
+                "type_addition": kind_addition,
+                "series_uuid": None,
+                "series_no": None,
+                "comment": comment
+            },
+            self
+        )
 
-    def remove_media(self, id: int):
+    def remove_media(self, id: Union[Media, int]):
         """
         :param id: media id
         :return: None
         """
-        cur = self.index_db.cursor()
+        if isinstance(id, Media):
+            id = id.id
+        cur = self.db.cursor()
         cur.execute(
             """
             SELECT hash, filename FROM media WHERE id = ?;
@@ -247,16 +290,18 @@ class Library:
             (id,)
         )
         cur.close()
-        self.index_db.commit()
+        self.db.commit()
         os.remove(fp)
 
-    def update_media(self, id: int, new: dict):
+    def update_media(self, id: Union[Media, int], new: dict):
         """
         :param id: media id
         :param new: data to be updated, key is database's key
         :return: None
         """
-        cur = self.index_db.cursor()
+        if isinstance(id, Media):
+            id = id.id
+        cur = self.db.cursor()
         for (key, value) in new.items():
             if key not in ["filename", "caption", "type", "sub_type", "type_addition", "comment"]:
                 continue
@@ -269,7 +314,7 @@ class Library:
                 (value, id)
             )
         cur.close()
-        self.index_db.commit()
+        self.db.commit()
 
     def create_series(self, caption: str = "", comment: str = "") -> str:
         """
@@ -277,7 +322,7 @@ class Library:
         :param comment: series' comment
         :return: series' uuid
         """
-        cur = self.index_db.cursor()
+        cur = self.db.cursor()
         uuid = gen_uuid()
         cur.execute(
             """
@@ -287,20 +332,31 @@ class Library:
             (uuid, caption, comment, 0)
         )
         cur.close()
-        self.index_db.commit()
+        self.db.commit()
         return uuid
 
     def delete_series(self, uuid: str):
-        cur = self.index_db.cursor()
+        cur = self.db.cursor()
         cur.execute(
             """
             DELETE FROM series WHERE uuid = ?;
             """,
             (uuid,)
         )
+        cur.execute(
+            """
+            UPDATE media
+            SET series_uuid = NULL, series_no = NULL
+            WHERE series_uuid = ?;
+            """,
+            (uuid,)
+        )
+        self.db.commit()
 
-    def add_to_series(self, media_id: int, series_uuid: str, media_no: int = None):
-        cur = self.index_db.cursor()
+    def add_to_series(self, media_id: Union[Media, int], series_uuid: str, media_no: int = None):
+        if isinstance(media_id, Media):
+            media_id = media_id.id
+        cur = self.db.cursor()
         cur.execute(
             """
             SELECT series_no FROM media WHERE series_uuid = ? AND id != ?;
@@ -329,10 +385,14 @@ class Library:
             (series_uuid,)
         )
         cur.close()
-        self.index_db.commit()
+        self.db.commit()
 
-    def remove_from_series(self, media_id: int):
-        cur = self.index_db.cursor()
+    def remove_from_series(self, media_id: Union[Media, int]):
+        if isinstance(media_id, Media):
+            media_id = media_id.id
+        if isinstance(media_id, Media):
+            media_id = media_id.id
+        cur = self.db.cursor()
         cur.execute(
             """
             SELECT series_uuid FROM media WHERE id = ?;
@@ -360,10 +420,12 @@ class Library:
             (series_uuid,)
         )
         cur.close()
-        self.index_db.commit()
+        self.db.commit()
 
-    def update_series_no(self, media_id: int, media_no: int, insert: bool = False):
-        cur = self.index_db.cursor()
+    def update_series_no(self, media_id: Union[Media, int], media_no: int, insert: bool = False):
+        if isinstance(media_id, Media):
+            media_id = media_id.id
+        cur = self.db.cursor()
         cur.execute(
             """
             SELECT series_uuid FROM media WHERE id = ?;
@@ -412,13 +474,13 @@ class Library:
                 )
 
         cur.close()
-        self.index_db.commit()
+        self.db.commit()
 
     def trim_series_no(self, series_uuid: str):
         """
         Dude, you should rarely use this function for the GOD's sake.
         """
-        cur = self.index_db.cursor()
+        cur = self.db.cursor()
         cur.execute(
             """
             SELECT id, series_no FROM media WHERE series_uuid = ?;
@@ -438,10 +500,16 @@ class Library:
                 (media_no, media_id)
             )
         cur.close()
-        self.index_db.commit()
+        self.db.commit()
 
-    def get_media(self, media_id: int) -> Media:
-        cur = self.index_db.cursor()
+    def get_media(self, media_id: Union[Media, int]) -> Media:
+        """
+        :param media_id: when you pass media_id as Media, we do query from the database again
+        :return: Media
+        """
+        if isinstance(media_id, Media):
+            media_id = media_id.id
+        cur = self.db.cursor()
         cur.execute(
             """
             SELECT * FROM media WHERE id = ?;
@@ -452,28 +520,21 @@ class Library:
         cur.close()
         return Media.from_dict(
             {
+                "id": media_id,
                 "hash": media[1],
                 "filename": media[2],
-                "caption": media[3],
-                "time_add": media[4],
-                "type": MediaType(media[5]),
-                "sub_type": media[6],
-                "type_addition": media[7],
-                "series_uuid": media[8],
-                "series_no": media[9],
-                "comment": media[10]
+                "filesize": media[3],
+                "caption": media[4],
+                "time_add": media[5],
+                "type": MediaType(media[6]),
+                "sub_type": media[7],
+                "type_addition": media[8],
+                "series_uuid": media[9],
+                "series_no": media[10],
+                "comment": media[11]
             },
             self
         )
-
-    def link_library(self):
-        pass
-
-    def unlink_library(self):
-        pass
-
-    def sync(self, master_table):
-        pass
 
     def __str__(self):
         return """Library name: {}\nMaster name: {}\nLocal name: {}\nUUID: {}\nPath: {}\nschema: {}\n{}""".format(

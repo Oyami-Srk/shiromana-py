@@ -2,8 +2,7 @@ import os
 
 LIBRARY_EXT = ".mlib"
 METADATA_FN = "metadata.json"
-DATABASE_FN = "index.db"
-MEDIA_DATABASE_FN = "media.db"
+DATABASE_FN = "shiromana.db"
 SHARED_DATABASE_FN = "shared.db"
 FINGERPRINT_FN = ".shiromana"
 MEDIAS_FOLDER = "medias"

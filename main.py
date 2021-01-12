@@ -13,7 +13,6 @@ if __name__ == '__main__':
     id_1 = lib.add_media("test/1.jpg", MediaType.Image)
     id_2 = lib.add_media("test/2.jpg", MediaType.Image)
     id_3 = lib.add_media("test/3.jpg", MediaType.Image)
-    print("Insert ID: {}, {}, {}".format(id_1, id_2, id_3))
     lib.remove_media(id_2)
     id_2 = lib.add_media("test/2.jpg", MediaType.Image)
     id_4 = lib.add_media("test/4.jpg", MediaType.Image)
@@ -28,5 +27,3 @@ if __name__ == '__main__':
     lib.trim_series_no(series_uuid)
     media = lib.get_media(id_4)
     print(media)
-    while True:
-        pass
